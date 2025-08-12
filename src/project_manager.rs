@@ -6,11 +6,13 @@ use crate::{analyzer_handler::*, path_utils, project::Project};
 use anyhow::{Ok, Result};
 use codespan_reporting::diagnostic::Severity;
 use codespan_reporting::term::termcolor::Buffer;
+use move_core_types::account_address::AccountAddress;
 use move_model::metadata::CompilerVersion;
 use move_model::metadata::LanguageVersion;
 use move_model::model::GlobalEnv;
 use move_package::compilation::build_plan::BuildPlan;
 use move_package::source_package::{layout::SourcePackageLayout, manifest_parser::*};
+use regex::Regex;
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -36,7 +38,11 @@ impl Project {
     }
 
     fn get_global_env_by_move_package_v2(&mut self, pkg_path: &Path) -> Result<GlobalEnv> {
-        let build_config = move_package::BuildConfig {
+        log::info!(
+            "get_global_env_by_move_package_v2 pkg_path = {:?}",
+            pkg_path
+        );
+        let mut build_config = move_package::BuildConfig {
             test_mode: true,
             install_dir: Some(tempdir().unwrap().path().to_path_buf()),
             skip_fetch_latest_git_deps: true,
@@ -47,8 +53,52 @@ impl Project {
             },
             ..Default::default()
         };
-        let resolution_graph =
-            build_config.resolution_graph_for_package(pkg_path, &mut Vec::new())?;
+
+        // let resolution_graph =
+        //     build_config.resolution_graph_for_package(pkg_path, &mut Vec::new())?;
+
+        // Try to build the resolution graph. If unresolved addresses are reported, inject
+        // random addresses into additional_named_addresses and retry.
+        let resolution_graph = loop {
+            match build_config
+                .clone()
+                .resolution_graph_for_package(pkg_path, &mut Vec::new())
+            {
+                std::result::Result::Ok(graph) => break graph,
+                Err(err) => {
+                    let msg = err.to_string();
+                    if !msg.contains("Unresolved addresses found") {
+                        return Err(err);
+                    }
+                    let re = Regex::new("Named address '([^']+)' ").unwrap();
+                    let mut added_any = false;
+                    for cap in re.captures_iter(&msg) {
+                        if let Some(name) = cap.get(1).map(|m| m.as_str().to_string()) {
+                            if !build_config.additional_named_addresses.contains_key(&name) {
+                                let rand_addr = format!(
+                                    "0x{:064x}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos()
+                                );
+                                if let std::result::Result::Ok(parsed) =
+                                    AccountAddress::from_hex_literal(&rand_addr)
+                                {
+                                    build_config.additional_named_addresses.insert(name, parsed);
+                                    added_any = true;
+                                }
+                            }
+                        }
+                    }
+                    if !added_any {
+                        return Err(err);
+                    }
+                    // retry loop with updated build_config
+                    continue;
+                }
+            }
+        };
         let build_plan = BuildPlan::create(resolution_graph)?;
         let compile_cfg = move_package::CompilerConfig {
             compiler_version: Some(CompilerVersion::V2_1),
@@ -61,9 +111,38 @@ impl Project {
             vec![],
             // |_compiler| Ok(Default::default()),
             |compile_option| {
-                let addrs = move_model::parse_addresses_from_options(
-                    compile_option.named_address_mapping.clone(),
-                )?;
+                log::info!(
+                    "compile_option.named_address_mapping = {:?}",
+                    compile_option.named_address_mapping
+                );
+
+                // Replace dev placeholder "_" in values with a random (time-derived) address.
+                let processed_named_addrs: Vec<String> = compile_option
+                    .named_address_mapping
+                    .clone()
+                    .into_iter()
+                    .map(|entry| match entry.split_once('=') {
+                        Some((k, v)) => {
+                            let key = k.trim();
+                            let val_trimmed = v.trim();
+                            if val_trimmed == "_" {
+                                let rand_addr = format!(
+                                    "0x{:064x}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos()
+                                );
+                                format!("{}={}", key, rand_addr)
+                            } else {
+                                format!("{}={}", key, val_trimmed)
+                            }
+                        }
+                        None => entry,
+                    })
+                    .collect();
+
+                let addrs = move_model::parse_addresses_from_options(processed_named_addrs)?;
                 let mut helper = HashMap::new();
                 for (addr_name, addr_num) in addrs.iter() {
                     helper.insert(addr_name.clone(), addr_num.to_string());
@@ -218,6 +297,7 @@ impl Project {
         targets_paths: &mut Vec<PathBuf>,
         dependents_paths: &mut Vec<PathBuf>,
     ) -> Result<()> {
+        log::info!("load_project manifest_path = {:?}", manifest_path);
         let manifest_path = normal_path(manifest_path);
         if self.modules.get(&manifest_path).is_some() {
             log::trace!("manifest '{:?}' loaded before skipped.", &manifest_path);

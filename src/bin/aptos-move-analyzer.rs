@@ -81,7 +81,7 @@ fn main() {
         .to_string_lossy()
         .to_string();
     log::info!(
-        "Starting language server '{}' communicating via stdio...",
+        " HELLLLLOOOOOOOOWWW Starting language server '{}' communicating via stdio...",
         exe
     );
 
