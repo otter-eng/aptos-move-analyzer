@@ -19,10 +19,9 @@ use itertools::Itertools;
 use log::{Level, Metadata, Record};
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
-    notification::Notification as _, request::Request as _, CompletionOptions,
-    HoverProviderCapability, OneOf, SaveOptions,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    WorkDoneProgressOptions,
+    CompletionOptions, HoverProviderCapability, OneOf, SaveOptions, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgressOptions,
+    notification::Notification as _, request::Request as _,
 };
 use move_command_line_common::files::FileHash;
 use std::{collections::HashMap, path::PathBuf};
@@ -81,7 +80,7 @@ fn main() {
         .to_string_lossy()
         .to_string();
     log::info!(
-        " HELLLLLOOOOOOOOWWW Starting language server '{}' communicating via stdio...",
+        "HELLLLLOOOOOOOOWWW Starting language server '{}' communicating via stdio...",
         exe
     );
 
@@ -134,7 +133,7 @@ fn main() {
         ..Default::default()
     })
     .expect("could not serialize server capabilities");
-    
+
     context
         .connection
         .initialize_finish(
@@ -662,9 +661,7 @@ fn format_on_did_save(
     movefmt_cfg
         .set()
         .indent_size(analyzer_cfg.movefmt_config.indent_size as usize);
-    movefmt_cfg
-        .set()
-        .emit_mode(commentfmt::EmitMode::Overwrite);
+    movefmt_cfg.set().emit_mode(commentfmt::EmitMode::Overwrite);
 
     match movefmt::core::fmt::format_entry(file_content.clone(), movefmt_cfg) {
         Ok(result) => {

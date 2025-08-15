@@ -300,49 +300,170 @@ impl Handler {
             }
         }
 
-        let use_decl_module = env.get_modules().find(|m| {
-            m.get_full_name_str()
-                .eq_ignore_ascii_case(&addrnum_with_module_name)
-        })?;
-
-        self.get_mouse_loc(env, &capture_items_loc);
         if found_target_stct_or_fn {
-            log::info!("finding use decl module member...");
-            for stct in use_decl_module.get_structs() {
-                log::trace!(
-                    "per_struct_name = {:?}, target_struct: {}",
-                    stct.get_full_name_str(),
-                    target_stct_or_fn
-                );
-                if stct.get_full_name_str().contains(&target_stct_or_fn) {
-                    log::info!("stct.get_full_name_str() = {:?}", stct.get_full_name_str());
-                    log::trace!(
-                        "insert_result<use_decl> = {:?}",
-                        env.get_source(&capture_items_loc)
-                    );
-                    self.insert_result(env, &stct.get_loc(), &capture_items_loc);
-                    return Some(());
+            // Find the target module and function/struct
+            for module in env.get_modules() {
+                let module_name_str = module.get_name().display(env).to_string();
+                if addrnum_with_module_name.contains(&module_name_str) {
+                    for func in module.get_functions() {
+                        if func.get_name_str() == target_stct_or_fn {
+                            self.insert_result(env, &func.get_loc(), &capture_items_loc);
+                            return Some(());
+                        }
+                    }
+                    for stct in module.get_structs() {
+                        if stct.get_full_name_str() == target_stct_or_fn {
+                            self.insert_result(env, &stct.get_loc(), &capture_items_loc);
+                            return Some(());
+                        }
+                    }
                 }
             }
-            for func in use_decl_module.get_functions() {
-                log::trace!(
-                    "per_fun_name = {:?}, target_fun: {}",
-                    func.get_full_name_str(),
-                    target_stct_or_fn
-                );
-                if func.get_name_str().contains(&target_stct_or_fn) {
-                    log::info!("func.get_name_str() = {:?}", func.get_name_str());
-                    log::trace!(
-                        "insert_result<use_decl> = {:?}",
-                        env.get_source(&capture_items_loc)
+        } else {
+            // Go to the module itself
+            for module in env.get_modules() {
+                let module_name_str = module.get_name().display(env).to_string();
+
+                if addrnum_with_module_name.contains(&module_name_str) {
+                    log::info!(
+                        "process_use_decl -- use module = {:?}, loc = {:?}, capture_loc = {:?}",
+                        module_name_str,
+                        module.get_loc(),
+                        capture_items_loc
                     );
-                    self.insert_result(env, &func.get_loc(), &capture_items_loc);
+                    self.insert_result(env, &module.get_loc(), &capture_items_loc);
                     return Some(());
                 }
             }
         }
-        self.insert_result(env, &use_decl_module.get_loc(), &capture_items_loc);
         Some(())
+    }
+
+    fn process_friend_decl(&mut self, env: &GlobalEnv) -> Option<()> {
+        log::info!("process_friend_decl for goto definition");
+        let target_module = env.get_module(self.target_module_id);
+
+        let friend_decl = target_module
+            .get_friend_decls()
+            .iter()
+            .find(|us| us.loc.contains(env, (self.line, self.col)))?;
+
+        let use_pos = env.get_location(&friend_decl.loc).unwrap();
+        log::info!("find friend decl module, line: {}", use_pos.line);
+
+        let numeric_module_addr = match friend_decl.module_name.addr() {
+            Address::Numerical(addr) => addr.to_owned(),
+            Address::Symbolic(sym) => {
+                let Some(addr) = env.resolve_address_alias(*sym) else {
+                    log::error!("could not convert addrname to addrnum, please check you friend decl");
+                    return None;
+                };
+                addr
+            }
+        };
+        let module_name = friend_decl.module_name.name().to_string(env);
+
+        let addrnum_with_module_name = format!(
+            "0x{}::{}",
+            numeric_module_addr.short_str_lossless(),
+            module_name.clone()
+        );
+        let capture_items_loc = friend_decl.loc.clone();
+
+        for module in env.get_modules() {
+            let module_name_str = module.get_name().display(env).to_string();
+
+            if addrnum_with_module_name.contains(&module_name_str) {
+                log::info!(
+                    "process_friend_decl -- friend module = {:?}, loc = {:?}, capture_loc = {:?}",
+                    module_name_str,
+                    module.get_loc(),
+                    capture_items_loc
+                );
+                self.insert_result(env, &module.get_loc(), &capture_items_loc);
+                return Some(());
+            }
+        }
+
+        // let file_id = target_module.get_loc().file_id();
+
+        // let file_source = env.get_file_source(file_id);
+        // let file_index = line_index::LineIndex::new(file_source);
+
+        // // Compute a capture span around the cursor (used for ranking/selection)
+        // if let Some(line_offset_start) = file_index.line(self.line) {
+        //     if let Some(line_offset_end) = file_index.offset(line_index::LineCol {
+        //         line: self.line,
+        //         col: self.col,
+        //     }) {
+        //         // Use the FULL source line to extract the friend module name so it is not truncated
+        //         let lines: Vec<&str> = file_source.lines().collect();
+        //         if (self.line as usize) < lines.len() {
+        //             let full_line_source = lines[self.line as usize];
+        //             if full_line_source.contains("friend") {
+        //                 if let Some(friend_module) =
+        //                     self.extract_friend_module_name(full_line_source)
+        //                 {
+        //                     if let Some(loc) =
+        //                         self.find_friend_module_loc(env, &friend_module).clone()
+        //                     {
+        //                         let capture_loc = move_model::model::Loc::new(
+        //                             file_id,
+        //                             codespan::Span::new(
+        //                                 u32::from(line_offset_start.start()),
+        //                                 u32::from(line_offset_end),
+        //                             ),
+        //                         );
+        //                         log::info!(
+        //                             "process_friend_decl -- friend module = {:?}, loc = {:?}, capture_loc = {:?}",
+        //                             friend_module,
+        //                             loc,
+        //                             capture_loc
+        //                         );
+        //                         self.insert_result(env, &loc, &capture_loc);
+        //                         return Some(());
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        Some(())
+    }
+
+    fn _extract_friend_module_name(&self, line_source: &str) -> Option<String> {
+        // Parse friend abc::bcd; format
+        let trimmed = line_source.trim();
+        if trimmed.starts_with("friend") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                Some(parts[1].replace(";", ""))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn _find_friend_module_loc<'a>(
+        &'a self,
+        env: &'a GlobalEnv,
+        friend_module_name: &str,
+    ) -> Option<move_model::model::Loc> {
+        let friend_module_name = friend_module_name.trim();
+        let f_module_name = friend_module_name
+            .split("::")
+            .last()
+            .unwrap_or(friend_module_name);
+
+        for module in env.get_modules() {
+            let module_name = module.get_name().display(env).to_string();
+            if module_name == f_module_name {
+                return Some(module.get_loc());
+            }
+        }
+        None
     }
 
     fn process_func(&mut self, env: &GlobalEnv) -> Option<()> {
@@ -1299,6 +1420,7 @@ impl Handler {
                     self.process_spec_struct(env);
                 } else {
                     self.process_use_decl(env);
+                    self.process_friend_decl(env);
                     self.process_func(env);
                     self.process_struct(env);
                 }
@@ -1330,6 +1452,11 @@ impl Handler {
             };
 
             if self.capture_items_span_push(&capture_loc.span()) {
+                log::trace!(
+                    ">> insert_result: {:?} at {:?}",
+                    env.get_source(result_loc),
+                    env.get_file_and_location(result_loc)
+                );
                 self.result_candidates.push(result);
             }
         }

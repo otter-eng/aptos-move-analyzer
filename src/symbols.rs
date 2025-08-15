@@ -126,6 +126,7 @@ pub fn on_document_symbol_request(context: &Context, request: &Request) -> lsp_s
         handle_document_symbols_function(project, &module_env, &mut children);
         handle_document_symbols_const(project, &module_env, &mut children);
         handle_document_symbols_struct(project, &module_env, &mut children);
+        handle_document_symbols_friend_modules(project, &module_env, &mut children);
 
         result_vec_document_symbols.push(DocumentSymbol {
             name: module_name,
@@ -313,5 +314,56 @@ fn handle_document_symbols_struct_fields(
             tags: Some(vec![]),
             deprecated: Some(false),
         });
+    }
+}
+
+/// Helper function to handle friend modules in the document symbols
+#[allow(deprecated)]
+fn handle_document_symbols_friend_modules(
+    project: &Project,
+    module_env: &ModuleEnv,
+    children: &mut Vec<DocumentSymbol>,
+) {
+    // Since move-model may not have explicit friend support, we'll try to infer from the source
+    let file_source = project
+        .global_env
+        .get_file_source(module_env.get_loc().file_id());
+    let lines: Vec<&str> = file_source.lines().collect();
+
+    for (line_num, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("friend") {
+            // Extract friend module name
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let friend_module_name = parts[1].to_string();
+
+                // Create a symbol for the friend module
+                let friend_symbol = DocumentSymbol {
+                    name: format!("friend {}", friend_module_name),
+                    detail: Some(format!("Friend module: {}", friend_module_name)),
+                    kind: SymbolKind::MODULE,
+                    range: project.loc_to_range(&move_model::model::Loc::new(
+                        module_env.get_loc().file_id(),
+                        codespan::Span::new(
+                            codespan::ByteIndex(line_num as u32),
+                            codespan::ByteIndex((line_num + 1) as u32),
+                        ),
+                    )),
+                    selection_range: project.loc_to_range(&move_model::model::Loc::new(
+                        module_env.get_loc().file_id(),
+                        codespan::Span::new(
+                            codespan::ByteIndex(line_num as u32),
+                            codespan::ByteIndex((line_num + 1) as u32),
+                        ),
+                    )),
+                    children: None,
+                    tags: Some(vec![]),
+                    deprecated: Some(false),
+                };
+
+                children.push(friend_symbol);
+            }
+        }
     }
 }

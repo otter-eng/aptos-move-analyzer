@@ -9,6 +9,7 @@ use move_compiler::parser::lexer::Tok;
 use move_model::{
     ast::{ExpData::*, Operation::*, Pattern, SpecBlockTarget},
     model::{FunId, GlobalEnv, ModuleId, StructId},
+    ty::TypeDisplayContext,
 };
 use std::path::{Path, PathBuf};
 
@@ -190,7 +191,21 @@ impl Handler {
                         log::trace!("find use symbol = {}", name.display(spool));
                         target_stct_or_fn = name.display(spool).to_string();
                         found_target_stct_or_fn = true;
-                        ref_module = use_decl.module_name.display_full(env).to_string();
+                        let full_module_name = use_decl.module_name.display_full(env).to_string();
+                        // Extract just the module name part for easier matching
+                        let short_module_name =
+                            if let Some(last_part) = full_module_name.split("::").last() {
+                                last_part.to_string()
+                            } else {
+                                full_module_name.clone()
+                            };
+                        ref_module = short_module_name.clone();
+                        log::debug!(
+                            "Extracted use declaration - full module: {}, short module: {}, item: {}",
+                            full_module_name,
+                            short_module_name,
+                            target_stct_or_fn
+                        );
                         capture_items_loc = member_loc;
                         break;
                     }
@@ -206,29 +221,89 @@ impl Handler {
             return;
         }
 
-        for module in env.get_modules() {
-            let module_name = module.get_name().display(env).to_string();
-            if ref_module.contains(&module_name) {
-                target_module = module;
-                break;
+        if self.capture_items_span_push(&capture_items_loc.span()) {
+            // Extract documentation comments for the use declaration
+            let docs = self.extract_documentation_comments(env, &capture_items_loc);
+            // Get detailed information about the imported item
+            let item_details = self.get_item_details(env, &ref_module, &target_stct_or_fn);
+
+            let result = if docs.is_empty() {
+                format!(
+                    "**Use Declaration**\n\n**Module:** {}\n**Item:** {}",
+                    ref_module, target_stct_or_fn
+                )
+            } else {
+                format!(
+                    "**Use Declaration**\n\n**Module:** {}\n**Item:** {}\n\n**Documentation:**\n{}",
+                    ref_module, target_stct_or_fn, docs
+                )
+            };
+            self.result_candidates.push(result);
+        }
+    }
+
+    fn process_friend_decl(&mut self, env: &GlobalEnv) {
+        let target_module = env.get_module(self.target_module_id);
+        let spool = env.symbol_pool();
+
+        // Check if we can access friend declarations through the module
+        // Since move-model may not have explicit friend support, we'll try to infer from the source
+        let file_source = env.get_file_source(target_module.get_loc().file_id());
+        let file_index = line_index::LineIndex::new(file_source);
+
+        if let Some(line_offset_start) = file_index.line(self.line) {
+            if let Some(line_offset_end) = file_index.offset(line_index::LineCol {
+                line: self.line,
+                col: self.col,
+            }) {
+                // Use full source line to extract module name so hover on partial token still shows full name
+                let lines: Vec<&str> = file_source.lines().collect();
+                if (self.line as usize) < lines.len() {
+                    let full_line_source = lines[self.line as usize];
+                    if full_line_source.contains("friend") {
+                        if let Some(friend_module) =
+                            self.extract_friend_module_name(full_line_source)
+                        {
+                            if self.capture_items_span_push(&codespan::Span::new(
+                                u32::from(line_offset_start.start()),
+                                u32::from(line_offset_end),
+                            )) {
+                                // Extract documentation comments for the friend declaration
+                                let docs =
+                                    self.extract_documentation_comments_for_line(env, self.line);
+
+                                let result = if docs.is_empty() {
+                                    format!(
+                                        "**Friend Module Declaration**\n\n**Module:** {}\n\n**d:**\n{}",
+                                        friend_module, docs
+                                    )
+                                } else {
+                                    format!(
+                                        "**Friend Module Declaration**\n\n**Module:** {}\n\n**Documentation:**\n{}",
+                                        friend_module, docs
+                                    )
+                                };
+                                self.result_candidates.push(result);
+                            }
+                        }
+                    }
+                }
             }
         }
-        for stct in target_module.get_structs() {
-            if stct.get_full_name_str().contains(&target_stct_or_fn) {
-                if self.capture_items_span_push(&capture_items_loc.span()) {
-                    self.result_candidates.push(stct.get_full_name_str());
-                }
-                return;
+    }
+
+    fn extract_friend_module_name(&self, line_source: &str) -> Option<String> {
+        // Parse friend abc::bcd; format
+        let trimmed = line_source.trim();
+        if trimmed.starts_with("friend") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                Some(parts[1].replace(";", ""))
+            } else {
+                None
             }
-        }
-        for func in target_module.get_functions() {
-            if func.get_name_str().contains(&target_stct_or_fn) {
-                log::info!("<on hover> func.get_name_str() = {:?}", func.get_name_str());
-                if self.capture_items_span_push(&capture_items_loc.span()) {
-                    self.result_candidates.push(func.get_header_string());
-                }
-                return;
-            }
+        } else {
+            None
         }
     }
 
@@ -742,6 +817,7 @@ impl Handler {
                     self.process_spec_struct(env);
                 } else {
                     self.process_use_decl(env);
+                    self.process_friend_decl(env); // Added friend declaration processing
                     self.process_const(env);
                     self.process_func(env);
                     self.process_struct(env);
@@ -756,6 +832,251 @@ impl Handler {
         }
         self.capture_items_span.push(*span);
         true
+    }
+
+    fn extract_documentation_comments(
+        &self,
+        env: &GlobalEnv,
+        loc: &move_model::model::Loc,
+    ) -> String {
+        let mut docs = String::new();
+        let file_source = env.get_file_source(loc.file_id());
+        let lines: Vec<&str> = file_source.lines().collect();
+
+        if let Some(pos) = env.get_location(loc) {
+            let line_num = pos.line.0 as usize;
+
+            // Look for documentation comments above the declaration
+            let mut i = line_num;
+            while i > 0 {
+                i -= 1;
+                let line = lines[i].trim();
+                if line.starts_with("///") {
+                    docs.insert_str(0, &format!("{}\n", line.trim_start_matches('/').trim()));
+                } else if line.starts_with("//") && !line.starts_with("///") {
+                    // Skip regular comments
+                    break;
+                } else if line.is_empty() {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        docs.trim().to_string()
+    }
+
+    fn extract_documentation_comments_for_line(&self, env: &GlobalEnv, line: u32) -> String {
+        let target_module = env.get_module(self.target_module_id);
+
+        let file_source = env.get_file_source(target_module.get_loc().file_id());
+        let lines: Vec<&str> = file_source.lines().collect();
+
+        let mut docs = String::new();
+        let line_num = line as usize;
+
+        // Look for documentation comments above the friend declaration
+        let mut i = line_num;
+        while i > 0 {
+            i -= 1;
+            let line_content = lines[i].trim();
+            if line_content.starts_with("///") {
+                docs.insert_str(
+                    0,
+                    &format!("{}\n", line_content.trim_start_matches('/').trim()),
+                );
+            } else if line_content.starts_with("//") && !line_content.starts_with("///") {
+                // Skip regular comments
+                break;
+            } else if line_content.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        docs.trim().to_string()
+    }
+
+    fn get_item_details(&self, env: &GlobalEnv, module_name: &str, item_name: &str) -> String {
+        log::debug!(
+            "Looking for item '{}' in module '{}'",
+            item_name,
+            module_name
+        );
+        // Find the module that contains the imported item
+        for module in env.get_modules() {
+            let module_full_name = module.get_full_name_str();
+            log::debug!("Checking module: {}", module_full_name);
+            // Try to match the module name more accurately
+            if self.module_names_match(module_name, &module_full_name) {
+                log::debug!("Module name matches, searching for item '{}'", item_name);
+                // Check for functions
+                for func in module.get_functions() {
+                    let func_name = func.get_name_str();
+                    let func_full_name = func.get_full_name_str();
+                    log::debug!(
+                        "Checking function: {} (full: {})",
+                        func_name,
+                        func_full_name
+                    );
+                    if func_name == item_name
+                        || func_full_name == item_name
+                        || func_name.contains(item_name)
+                        || func_full_name.contains(item_name)
+                    {
+                        log::debug!("Found function: {}", func_name);
+                        return self.format_function_signature(&func, env);
+                    }
+                }
+
+                // Check for structs
+                for stct in module.get_structs() {
+                    let stct_name = stct.get_full_name_str();
+                    let stct_full_name = stct.get_full_name_str();
+                    log::debug!("Checking struct: {} (full: {})", stct_name, stct_full_name);
+                    if stct_full_name == item_name
+                        || stct_name.contains(item_name)
+                        || stct_full_name.contains(item_name)
+                    {
+                        log::debug!("Found struct: {}", stct_name);
+                        return self.format_struct_definition(&stct, env);
+                    }
+                }
+
+                // // Check for constants
+                // for const_env in module.get_named_constants() {
+                //     let const_name = const_env.get_name();
+                //     let const_full_name = const_env.get_full_name_str();
+                //     log::debug!(
+                //         "Checking constant: {} (full: {})",
+                //         const_name,
+                //         const_full_name
+                //     );
+                //     if const_name == item_name
+                //         || const_full_name == item_name
+                //         || const_name.contains(item_name)
+                //         || const_full_name.contains(item_name)
+                //     {
+                //         log::debug!("Found constant: {}", const_name);
+                //         return self.format_constant_definition(&const_env, env);
+                //     }
+                // }
+
+                // If it's a module itself, show the module path
+                // if module.get_name().name().to_string(env) == item_name {
+                //     log::debug!("Found module: {}", module.get_name_str());
+                //     return format!("**Module Path:**\n{}", module_full_name);
+                // }
+            }
+        }
+
+        log::warn!(
+            "Item '{}' not found in any module matching '{}'",
+            item_name,
+            module_name
+        );
+        // Fallback if item not found
+        format!("**Type:** Unknown item")
+    }
+
+    fn module_names_match(&self, use_module_name: &str, actual_module_name: &str) -> bool {
+        log::debug!(
+            "Comparing use module '{}' with actual module '{}'",
+            use_module_name,
+            actual_module_name
+        );
+        // Extract just the module name part from the full module path
+        // e.g., "aave_pool" from "0x1::aave_pool"
+        if let Some(last_part) = actual_module_name.split("::").last() {
+            let matches = last_part == use_module_name;
+            log::debug!(
+                "Last part '{}' matches '{}': {}",
+                last_part,
+                use_module_name,
+                matches
+            );
+            matches
+        } else {
+            let contains = actual_module_name.contains(use_module_name);
+            log::debug!(
+                "Module '{}' contains '{}': {}",
+                actual_module_name,
+                use_module_name,
+                contains
+            );
+            contains
+        }
+    }
+
+    fn format_function_signature(
+        &self,
+        func: &move_model::model::FunctionEnv,
+        env: &GlobalEnv,
+    ) -> String {
+        let mut signature = format!("**Function:**\n```move\npub fn {}(", func.get_name_str());
+
+        let context = TypeDisplayContext::new(env);
+        // Add parameters
+        let params: Vec<String> = func
+            .get_parameters()
+            .iter()
+            .map(|param| {
+                let param_type = param.1.display(&context);
+                format!("{}: {}", param.0.display(env.symbol_pool()), param_type)
+            })
+            .collect();
+
+        signature.push_str(&params.join(", "));
+        signature.push_str(")");
+
+        // Add return type if any
+        let return_type = func.get_result_type();
+        signature.push_str(&format!(" -> {}", return_type.display(&context)));
+
+        signature.push_str("\n```");
+        signature
+    }
+
+    fn format_struct_definition(
+        &self,
+        stct: &move_model::model::StructEnv,
+        env: &GlobalEnv,
+    ) -> String {
+        let mut definition = format!(
+            "**Struct:**\n```move\npub struct {} {{\n",
+            stct.get_full_name_str()
+        );
+        let context = TypeDisplayContext::new(env);
+
+        // Add fields
+        for field in stct.get_fields() {
+            let field_type = field.get_type();
+            definition.push_str(&format!(
+                "    {}: {},\n",
+                field.get_name().display(env.symbol_pool()),
+                field_type.display(&context)
+            ));
+        }
+
+        definition.push_str("}\n```");
+        definition
+    }
+
+    fn format_constant_definition(
+        &self,
+        const_env: &move_model::model::NamedConstantEnv,
+        env: &GlobalEnv,
+    ) -> String {
+        let context = TypeDisplayContext::new(env);
+        let binding = const_env.clone().get_type();
+        let const_type = binding.display(&context);
+        format!(
+            "**Constant:**\n```move\npub const {}: {} = ...;\n```",
+            const_env.get_name().display(env.symbol_pool()),
+            const_type
+        )
     }
 }
 
