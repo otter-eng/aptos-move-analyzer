@@ -27,9 +27,15 @@ pub fn on_hover_request(context: &Context, request: &Request) -> lsp_server::Res
     let loc = parameters.text_document_position_params.position;
     let line = loc.line;
     let col = loc.character;
+    log::info!("LSP coordinates - line: {}, col: {}", line, col);
     let fpath = path_concat(std::env::current_dir().unwrap().as_path(), fpath.as_path());
 
     let mut handler = Handler::new(fpath.clone(), line, col);
+    log::info!(
+        "Handler created with line: {}, col: {}",
+        handler.line,
+        handler.col
+    );
     match context.projects.get_project(&fpath) {
         Some(x) => x,
         None => {
@@ -92,6 +98,13 @@ impl Handler {
         env: &GlobalEnv,
         loc: &move_model::model::Loc,
     ) -> bool {
+        log::info!(
+            "Checking if mouse pos (line: {}, col: {}) is within loc: {:?}",
+            self.line,
+            self.col,
+            loc
+        );
+
         if let Some(obj_first_col) = env.get_location(&move_model::model::Loc::new(
             loc.file_id(),
             codespan::Span::new(
@@ -103,14 +116,24 @@ impl Handler {
                 loc.file_id(),
                 codespan::Span::new(loc.span().end(), loc.span().end() + codespan::ByteOffset(1)),
             )) {
+                log::info!(
+                    "Location spans from line: {}, col: {} to line: {}, col: {}",
+                    u32::from(obj_first_col.line),
+                    u32::from(obj_first_col.column),
+                    u32::from(obj_last_col.line),
+                    u32::from(obj_last_col.column)
+                );
+
                 if u32::from(obj_first_col.line) == self.line
                     && u32::from(obj_first_col.column) < self.col
                     && self.col < u32::from(obj_last_col.column)
                 {
+                    log::info!("Mouse position is within location span!");
                     return true;
                 }
             }
         }
+        log::info!("Mouse position is NOT within location span");
         false
     }
 
@@ -166,18 +189,99 @@ impl Handler {
     }
 
     fn process_use_decl(&mut self, env: &GlobalEnv) {
-        let mut target_module = env.get_module(self.target_module_id);
+        let target_module = env.get_module(self.target_module_id);
         let spool = env.symbol_pool();
         let mut ref_module = String::default();
         let mut target_stct_or_fn = String::default();
         let mut found_target_stct_or_fn = false;
         let mut capture_items_loc = move_model::model::Loc::default();
+        let mut is_module_hover = false;
+        let mut full_module_name_for_display = String::default();
+
+        log::info!("Processing use declarations for line {}", self.line);
+        log::info!("Target module: {}", target_module.get_name().display(env));
+
+        // Debug: Show the file content around the hover position
+        let file_source = env.get_file_source(target_module.get_loc().file_id());
+        let lines: Vec<&str> = file_source.lines().collect();
+        if (self.line as usize) < lines.len() {
+            log::info!(
+                "File content at line {}: '{}'",
+                self.line,
+                lines[self.line as usize]
+            );
+            log::info!("Hover coordinates: line={}, col={}", self.line, self.col);
+            log::info!(
+                "Character at hover position: '{}'",
+                if (self.col as usize) < lines[self.line as usize].len() {
+                    lines[self.line as usize]
+                        .chars()
+                        .nth(self.col as usize)
+                        .unwrap_or(' ')
+                } else {
+                    ' '
+                }
+            );
+            if self.line > 0 && (self.line as usize - 1) < lines.len() {
+                log::info!(
+                    "File content at line {}: '{}'",
+                    self.line - 1,
+                    lines[self.line as usize - 1]
+                );
+            }
+            if (self.line as usize + 1) < lines.len() {
+                log::info!(
+                    "File content at line {}: '{}'",
+                    self.line + 1,
+                    lines[self.line as usize + 1]
+                );
+            }
+        }
+
         for use_decl in target_module.get_use_decls() {
+            log::info!("Checking use_decl: {:?}", use_decl);
+            log::info!("Use declaration details:");
+            log::info!(
+                "  - Module name: {}",
+                use_decl.module_name.display_full(env)
+            );
+            log::info!("  - Has members: {}", !use_decl.members.is_empty());
+            log::info!("  - Member count: {}", use_decl.members.len());
+            if !use_decl.members.is_empty() {
+                log::info!(
+                    "  - Members: {:?}",
+                    use_decl
+                        .members
+                        .iter()
+                        .map(|(_, name, _)| name.display(spool).to_string())
+                        .collect::<Vec<_>>()
+                );
+            }
+            log::info!("  - Location: {:?}", env.get_location(&use_decl.loc));
+
             if let Some(use_pos) = env.get_location(&use_decl.loc) {
+                log::info!("Use decl at line: {}", u32::from(use_pos.line));
+                log::info!(
+                    "Use decl line comparison: {} vs {} (diff: {})",
+                    u32::from(use_pos.line),
+                    self.line,
+                    u32::from(use_pos.line) as i32 - self.line as i32
+                );
                 if u32::from(use_pos.line) != self.line {
+                    // Try adjusting for coordinate system difference
+                    if u32::from(use_pos.line) == self.line + 1 {
+                        log::info!(
+                            "Coordinate system mismatch detected! LSP uses 0-based, move-model uses 1-based"
+                        );
+                    } else if u32::from(use_pos.line) + 1 == self.line {
+                        log::info!(
+                            "Coordinate system mismatch detected! LSP uses 1-based, move-model uses 0-based"
+                        );
+                    }
                     continue;
                 }
             }
+
             log::trace!(
                 "use_decl.loc = {:?}, use_decl.loc.len = {:?}",
                 use_decl.loc,
@@ -185,13 +289,156 @@ impl Handler {
             );
 
             if !use_decl.members.is_empty() {
+                log::info!("Use decl has {} members", use_decl.members.len());
+                // Check if we're hovering on the module name vs specific items
+                // We need to be more precise about the position
+                let full_module_name = use_decl.module_name.display_full(env).to_string();
+
+                // Try to find the opening brace position to determine if we're on module name or items
+                let line_content = if (self.line as usize) < lines.len() {
+                    lines[self.line as usize]
+                } else {
+                    ""
+                };
+                log::info!("Line content: '{}'", line_content);
+
+                if let Some(brace_pos) = line_content.find('{') {
+                    // Case 1: Use declaration with braces like "use aptos_framework::timestamp::{...}"
+                    // Check if we're hovering before the opening brace (module name) or after it (items)
+                    let char_pos = self.col as usize;
+                    log::info!(
+                        "Hover at char position: {}, opening brace at: {}",
+                        char_pos,
+                        brace_pos
+                    );
+
+                    if char_pos <= brace_pos {
+                        // Hovering on module name (before the opening brace)
+                        log::info!("Hovering on module name in use declaration with braces");
+                        full_module_name_for_display = full_module_name.clone();
+                        let short_module_name =
+                            if let Some(last_part) = full_module_name.split("::").last() {
+                                last_part.to_string()
+                            } else {
+                                full_module_name.clone()
+                            };
+                        ref_module = short_module_name.clone();
+                        target_stct_or_fn = short_module_name.clone();
+                        found_target_stct_or_fn = true;
+                        is_module_hover = true;
+                        capture_items_loc = use_decl.loc.clone();
+                        log::info!(
+                            "Found use declaration on module name - module: {}, item: {}",
+                            full_module_name,
+                            target_stct_or_fn
+                        );
+                        break;
+                    } else {
+                        // Hovering after opening brace, check for specific items
+                        log::info!("Hovering after opening brace, checking for specific items");
+                    }
+                } else {
+                    // Case 2: Direct item import without braces like "use aptos_framework::fungible_asset::Metadata"
+                    // Check if we're hovering on the module part vs the item part
+                    let char_pos = self.col as usize;
+                    log::info!(
+                        "No braces found, checking direct item import. Hover at char position: {}",
+                        char_pos
+                    );
+
+                    // Check each module level to see which one we're hovering on
+                    let module_parts: Vec<&str> = full_module_name.split("::").collect();
+                    log::info!("Module parts: {:?}", module_parts);
+
+                    // Safety check: make sure we have module parts to work with
+                    if module_parts.is_empty() {
+                        log::warn!("No module parts found, using fallback");
+                        full_module_name_for_display = full_module_name.clone();
+                        ref_module = full_module_name.clone();
+                        target_stct_or_fn = full_module_name.clone();
+                        found_target_stct_or_fn = true;
+                        is_module_hover = true;
+                        capture_items_loc = use_decl.loc.clone();
+                        break;
+                    }
+
+                    // Find all :: positions in the line
+                    let colon_positions: Vec<usize> = line_content
+                        .char_indices()
+                        .filter_map(|(i, c)| if c == ':' { Some(i) } else { None })
+                        .collect();
+                    log::info!("Colon positions: {:?}", colon_positions);
+
+                    // Check if we're hovering on any module level
+                    let mut found_module_level = false;
+                    for (i, colon_pos) in colon_positions.iter().enumerate() {
+                        // Safety check: make sure we have enough module parts
+                        if i >= module_parts.len() {
+                            log::warn!(
+                                "Index {} out of bounds for module_parts (len: {})",
+                                i,
+                                module_parts.len()
+                            );
+                            continue;
+                        }
+
+                        if char_pos <= *colon_pos {
+                            // Hovering on this module level
+                            // Safety check: make sure we can create the slice [..=i]
+                            let module_name = if i < module_parts.len() {
+                                module_parts[..=i].join("::")
+                            } else {
+                                log::warn!("Cannot create slice [..={}], using fallback", i);
+                                full_module_name.clone()
+                            };
+                            log::info!(
+                                "Hovering on module level: {} (at position {})",
+                                module_name,
+                                colon_pos
+                            );
+
+                            full_module_name_for_display = module_name.clone();
+                            // Safety check: make sure we can access module_parts[i]
+                            let short_module_name = if i < module_parts.len() {
+                                module_parts[i].to_string()
+                            } else {
+                                log::warn!("Index {} out of bounds, using fallback", i);
+                                full_module_name.clone()
+                            };
+                            ref_module = short_module_name.clone();
+                            target_stct_or_fn = short_module_name.clone();
+                            found_target_stct_or_fn = true;
+                            is_module_hover = true;
+                            capture_items_loc = use_decl.loc.clone();
+                            log::info!(
+                                "Found use declaration on module level - module: {}, item: {}",
+                                module_name,
+                                target_stct_or_fn
+                            );
+                            found_module_level = true;
+                            break;
+                        }
+                    }
+
+                    if !found_module_level {
+                        // Hovering after all ::, so it's on the final item
+                        log::info!("Hovering on final item in direct item import");
+                    }
+                }
+
                 for (member_loc, name, _) in use_decl.members.clone().into_iter() {
                     log::trace!("member_loc = {:?} ---", env.get_location(&member_loc));
+                    log::info!(
+                        "Checking member: {} at {:?}",
+                        name.display(spool),
+                        member_loc
+                    );
                     if self.check_move_model_loc_contains_mouse_pos(env, &member_loc) {
                         log::trace!("find use symbol = {}", name.display(spool));
                         target_stct_or_fn = name.display(spool).to_string();
                         found_target_stct_or_fn = true;
                         let full_module_name = use_decl.module_name.display_full(env).to_string();
+                        full_module_name_for_display = full_module_name.clone();
                         // Extract just the module name part for easier matching
                         let short_module_name =
                             if let Some(last_part) = full_module_name.split("::").last() {
@@ -200,51 +447,171 @@ impl Handler {
                                 full_module_name.clone()
                             };
                         ref_module = short_module_name.clone();
-                        log::debug!(
+                        log::info!(
                             "Extracted use declaration - full module: {}, short module: {}, item: {}",
                             full_module_name,
                             short_module_name,
                             target_stct_or_fn
                         );
                         capture_items_loc = member_loc;
+                        is_module_hover = false; // This is an item hover, not module hover
                         break;
                     }
                 }
+            } else {
+                log::info!("Use decl has no members, checking if hover is on the module name");
+                // If no members, check if we're hovering on the module name itself
+                if self.check_move_model_loc_contains_mouse_pos(env, &use_decl.loc) {
+                    // Additional check: make sure we're not hovering on a member that might be in the same location
+                    // Only show module info if this is truly a module-only use declaration
+                    log::info!(
+                        "Found use declaration with no members - this is a module-only import"
+                    );
+                    let full_module_name = use_decl.module_name.display_full(env).to_string();
+                    full_module_name_for_display = full_module_name.clone();
+                    let short_module_name =
+                        if let Some(last_part) = full_module_name.split("::").last() {
+                            last_part.to_string()
+                        } else {
+                            full_module_name.clone()
+                        };
+                    ref_module = short_module_name.clone();
+                    target_stct_or_fn = short_module_name.clone();
+                    found_target_stct_or_fn = true;
+                    is_module_hover = true;
+                    capture_items_loc = use_decl.loc.clone();
+                    log::info!(
+                        "Found use declaration on module name - module: {}, item: {}",
+                        full_module_name,
+                        target_stct_or_fn
+                    );
+                    break;
+                }
             }
             if found_target_stct_or_fn {
+                log::info!(
+                    "Found target in use declaration: {} (module: {}, item: {}, is_module_hover: {})",
+                    target_stct_or_fn,
+                    ref_module,
+                    target_stct_or_fn,
+                    is_module_hover
+                );
                 break;
             }
         }
 
         if !found_target_stct_or_fn {
             log::info!("<on hover> not found_target_stct_or_fn in use_decl");
+            log::info!(
+                "No use declaration matched for hover at line: {}, col: {}",
+                self.line,
+                self.col
+            );
+            // Fallback: try to find use declarations within a few lines
+            log::info!(
+                "Trying fallback approach - looking for use declarations near line {}",
+                self.line
+            );
+            for use_decl in target_module.get_use_decls() {
+                if let Some(use_pos) = env.get_location(&use_decl.loc) {
+                    let decl_line = u32::from(use_pos.line);
+                    let line_diff = if decl_line > self.line {
+                        decl_line - self.line
+                    } else {
+                        self.line - decl_line
+                    };
+                    log::info!("Found use_decl at line {} (diff: {})", decl_line, line_diff);
+
+                    if line_diff <= 2 {
+                        // Within 2 lines
+                        log::info!("Use decl is close enough, checking if it has members");
+                        if !use_decl.members.is_empty() {
+                            // Just show the first member as an example
+                            let (_member_loc, name, _) = &use_decl.members[0];
+                            let full_module_name =
+                                use_decl.module_name.display_full(env).to_string();
+                            let short_module_name =
+                                if let Some(last_part) = full_module_name.split("::").last() {
+                                    last_part.to_string()
+                                } else {
+                                    full_module_name.clone()
+                                };
+
+                            log::info!(
+                                "Fallback: showing use declaration for {} from module {}",
+                                name.display(spool),
+                                short_module_name
+                            );
+
+                            let item_details = self.get_item_details(
+                                env,
+                                &short_module_name,
+                                &name.display(spool).to_string(),
+                            );
+                            let result = format!(
+                                "**Use Declaration (Fallback)**\n\n**Module:** {}\n**Item:** {}\n\n{}",
+                                short_module_name,
+                                name.display(spool),
+                                item_details
+                            );
+                            self.result_candidates.push(result);
+                            return;
+                        }
+                    }
+                }
+            }
             return;
         }
 
         if self.capture_items_span_push(&capture_items_loc.span()) {
             // Extract documentation comments for the use declaration
             let docs = self.extract_documentation_comments(env, &capture_items_loc);
-            // Get detailed information about the imported item
-            let item_details = self.get_item_details(env, &ref_module, &target_stct_or_fn);
 
-            let result = if docs.is_empty() {
-                format!(
-                    "**Use Declaration**\n\n**Module:** {}\n**Item:** {}",
-                    ref_module, target_stct_or_fn
-                )
+            log::info!(
+                "Hover type: {} (is_module_hover: {})",
+                if is_module_hover { "MODULE" } else { "ITEM" },
+                is_module_hover
+            );
+
+            let result = if is_module_hover {
+                // If hovering on module name, show module information
+                let module_info = format!(
+                    "```move\nmodule {} {{\n    // Module contents\n}}\n```",
+                    full_module_name_for_display
+                );
+
+                log::info!("Showing MODULE information: {}", module_info);
+
+                if docs.is_empty() {
+                    module_info
+                } else {
+                    format!("{}\n\n**Documentation:**\n{}", module_info, docs)
+                }
             } else {
-                format!(
-                    "**Use Declaration**\n\n**Module:** {}\n**Item:** {}\n\n**Documentation:**\n{}",
-                    ref_module, target_stct_or_fn, docs
-                )
+                // If hovering on item, show item details
+                let item_details = self.get_item_details(env, &ref_module, &target_stct_or_fn);
+                log::info!("Item details: {}", item_details);
+
+                log::info!(
+                    "Showing ITEM details for {} from module {}",
+                    target_stct_or_fn,
+                    ref_module
+                );
+
+                if docs.is_empty() {
+                    item_details
+                } else {
+                    format!("{}\n\n**Documentation:**\n{}", item_details, docs)
+                }
             };
+
+            log::info!("Final result: {}", result);
             self.result_candidates.push(result);
         }
     }
 
     fn process_friend_decl(&mut self, env: &GlobalEnv) {
         let target_module = env.get_module(self.target_module_id);
-        let spool = env.symbol_pool();
 
         // Check if we can access friend declarations through the module
         // Since move-model may not have explicit friend support, we'll try to infer from the source
@@ -260,10 +627,29 @@ impl Handler {
                 let lines: Vec<&str> = file_source.lines().collect();
                 if (self.line as usize) < lines.len() {
                     let full_line_source = lines[self.line as usize];
+                    log::info!(
+                        "Processing line for friend declaration: '{}'",
+                        full_line_source
+                    );
                     if full_line_source.contains("friend") {
+                        log::info!("Line contains 'friend' keyword, extracting module name");
                         if let Some(friend_module) =
                             self.extract_friend_module_name(full_line_source)
                         {
+                            log::info!("Found friend declaration for module: {}", friend_module);
+
+                            // Check if this is a module-only friend declaration or has specific items
+                            let is_module_only_friend = !full_line_source.contains("::");
+                            log::info!(
+                                "Friend declaration type: {} (contains '::': {})",
+                                if is_module_only_friend {
+                                    "MODULE_ONLY"
+                                } else {
+                                    "WITH_ITEMS"
+                                },
+                                full_line_source.contains("::")
+                            );
+
                             if self.capture_items_span_push(&codespan::Span::new(
                                 u32::from(line_offset_start.start()),
                                 u32::from(line_offset_end),
@@ -272,17 +658,20 @@ impl Handler {
                                 let docs =
                                     self.extract_documentation_comments_for_line(env, self.line);
 
+                                // Friend declarations are always about modules, so show module information
+                                let module_info = format!(
+                                    "```move\nmodule {} {{\n    // Friend module contents\n}}\n```",
+                                    friend_module
+                                );
+
+                                log::info!("Showing FRIEND MODULE information: {}", module_info);
+
                                 let result = if docs.is_empty() {
-                                    format!(
-                                        "**Friend Module Declaration**\n\n**Module:** {}\n\n**d:**\n{}",
-                                        friend_module, docs
-                                    )
+                                    module_info
                                 } else {
-                                    format!(
-                                        "**Friend Module Declaration**\n\n**Module:** {}\n\n**Documentation:**\n{}",
-                                        friend_module, docs
-                                    )
+                                    format!("{}\n\n**Documentation:**\n{}", module_info, docs)
                                 };
+
                                 self.result_candidates.push(result);
                             }
                         }
@@ -295,14 +684,20 @@ impl Handler {
     fn extract_friend_module_name(&self, line_source: &str) -> Option<String> {
         // Parse friend abc::bcd; format
         let trimmed = line_source.trim();
+        log::info!("Extracting friend module name from: '{}'", trimmed);
         if trimmed.starts_with("friend") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            log::info!("Friend declaration parts: {:?}", parts);
             if parts.len() >= 2 {
-                Some(parts[1].replace(";", ""))
+                let module_part = parts[1].replace(";", "");
+                log::info!("Extracted friend module: {}", module_part);
+                Some(module_part)
             } else {
+                log::info!("Friend declaration has insufficient parts");
                 None
             }
         } else {
+            log::info!("Line does not start with 'friend'");
             None
         }
     }
@@ -900,7 +1295,7 @@ impl Handler {
     }
 
     fn get_item_details(&self, env: &GlobalEnv, module_name: &str, item_name: &str) -> String {
-        log::debug!(
+        log::info!(
             "Looking for item '{}' in module '{}'",
             item_name,
             module_name
@@ -908,15 +1303,23 @@ impl Handler {
         // Find the module that contains the imported item
         for module in env.get_modules() {
             let module_full_name = module.get_full_name_str();
-            log::debug!("Checking module: {}", module_full_name);
+            log::info!("Checking module: {}", module_full_name);
             // Try to match the module name more accurately
             if self.module_names_match(module_name, &module_full_name) {
-                log::debug!("Module name matches, searching for item '{}'", item_name);
+                log::info!("Module name matches, searching for item '{}'", item_name);
+                let struct_count = module.get_structs().count();
+                log::info!("Module has {} structs", struct_count);
+                let struct_names: Vec<String> = module
+                    .get_structs()
+                    .map(|s| s.get_name().display(env.symbol_pool()).to_string())
+                    .collect();
+                log::info!("Struct names in module: {:?}", struct_names);
+
                 // Check for functions
                 for func in module.get_functions() {
                     let func_name = func.get_name_str();
                     let func_full_name = func.get_full_name_str();
-                    log::debug!(
+                    log::info!(
                         "Checking function: {} (full: {})",
                         func_name,
                         func_full_name
@@ -926,49 +1329,86 @@ impl Handler {
                         || func_name.contains(item_name)
                         || func_full_name.contains(item_name)
                     {
-                        log::debug!("Found function: {}", func_name);
-                        return self.format_function_signature(&func, env);
+                        log::info!("Found function: {}", func_name);
+                        let func_sig = self.format_function_signature(&func, env);
+                        return format!("{}\n{}", module_full_name, func_sig);
                     }
                 }
 
                 // Check for structs
                 for stct in module.get_structs() {
-                    let stct_name = stct.get_full_name_str();
+                    let name = stct.get_name();
+                    let stct_name = name.display(env.symbol_pool());
                     let stct_full_name = stct.get_full_name_str();
-                    log::debug!("Checking struct: {} (full: {})", stct_name, stct_full_name);
-                    if stct_full_name == item_name
-                        || stct_name.contains(item_name)
+                    log::info!("Checking struct: {} (full: {})", stct_name, stct_full_name);
+                    log::info!("Item name to match: '{}'", item_name);
+                    log::info!(
+                        "Struct name == item_name: {}",
+                        stct_name.to_string() == item_name
+                    );
+                    log::info!(
+                        "Struct full_name == item_name: {}",
+                        stct_full_name == item_name
+                    );
+                    log::info!(
+                        "Struct name contains item_name: {}",
+                        stct_name.to_string().contains(item_name)
+                    );
+                    log::info!(
+                        "Struct full_name contains item_name: {}",
+                        stct_full_name.contains(item_name)
+                    );
+                    if stct_name.to_string() == item_name
+                        || stct_full_name == item_name
+                        || stct_name.to_string().contains(item_name)
                         || stct_full_name.contains(item_name)
                     {
-                        log::debug!("Found struct: {}", stct_name);
-                        return self.format_struct_definition(&stct, env);
+                        log::info!("Found struct: {}", stct_name);
+                        log::info!("About to format struct definition");
+                        log::info!("Calling format_struct_definition directly");
+                        let result = self.format_struct_definition(&stct, env);
+                        log::info!("format_struct_definition returned: {}", result);
+                        return format!("{}\n{}", module_full_name, result);
                     }
                 }
 
-                // // Check for constants
-                // for const_env in module.get_named_constants() {
-                //     let const_name = const_env.get_name();
-                //     let const_full_name = const_env.get_full_name_str();
-                //     log::debug!(
-                //         "Checking constant: {} (full: {})",
-                //         const_name,
-                //         const_full_name
-                //     );
-                //     if const_name == item_name
-                //         || const_full_name == item_name
-                //         || const_name.contains(item_name)
-                //         || const_full_name.contains(item_name)
-                //     {
-                //         log::debug!("Found constant: {}", const_name);
-                //         return self.format_constant_definition(&const_env, env);
-                //     }
-                // }
+                // Check for constants
+                for const_env in module.get_named_constants() {
+                    let const_name = const_env.get_name().display(env.symbol_pool()).to_string();
+                    let const_full_name = const_env.module_env.get_full_name_str();
+                    log::info!(
+                        "Checking constant: {} (full: {})",
+                        const_name,
+                        const_full_name
+                    );
+                    if const_name == item_name
+                        || const_full_name == item_name
+                        || const_name.contains(item_name)
+                        || const_full_name.contains(item_name)
+                    {
+                        log::info!("Found constant: {}", const_name);
+                        let const_def = self.format_constant_definition(&const_env, env);
+                        return format!("{}\n{}", module_full_name, const_def);
+                    }
+                }
 
                 // If it's a module itself, show the module path
-                // if module.get_name().name().to_string(env) == item_name {
-                //     log::debug!("Found module: {}", module.get_name_str());
-                //     return format!("**Module Path:**\n{}", module_full_name);
-                // }
+                if module.get_name().display(env).to_string() == item_name {
+                    log::info!(
+                        "Found module: {}",
+                        module.get_name().display(env).to_string()
+                    );
+                    // Count the module contents
+                    let function_count = module.get_functions().count();
+                    let struct_count = module.get_structs().count();
+                    let constant_count = module.get_named_constants().count();
+
+                    // Format as a Move module declaration with content summary
+                    return format!(
+                        "```move \nmodule {} {{\n    // Functions: {}\n    // Structs: {}\n    // Constants: {}\n}}\n```",
+                        module_full_name, function_count, struct_count, constant_count
+                    );
+                }
             }
         }
 
@@ -982,7 +1422,7 @@ impl Handler {
     }
 
     fn module_names_match(&self, use_module_name: &str, actual_module_name: &str) -> bool {
-        log::debug!(
+        log::info!(
             "Comparing use module '{}' with actual module '{}'",
             use_module_name,
             actual_module_name
@@ -991,7 +1431,7 @@ impl Handler {
         // e.g., "aave_pool" from "0x1::aave_pool"
         if let Some(last_part) = actual_module_name.split("::").last() {
             let matches = last_part == use_module_name;
-            log::debug!(
+            log::info!(
                 "Last part '{}' matches '{}': {}",
                 last_part,
                 use_module_name,
@@ -1000,7 +1440,7 @@ impl Handler {
             matches
         } else {
             let contains = actual_module_name.contains(use_module_name);
-            log::debug!(
+            log::info!(
                 "Module '{}' contains '{}': {}",
                 actual_module_name,
                 use_module_name,
@@ -1015,8 +1455,10 @@ impl Handler {
         func: &move_model::model::FunctionEnv,
         env: &GlobalEnv,
     ) -> String {
-        let mut signature = format!("**Function:**\n```move\npub fn {}(", func.get_name_str());
-
+        let mut signature = format!(
+            "```rust \npublic fun {}(",
+            func.get_name().display(env.symbol_pool())
+        );
         let context = TypeDisplayContext::new(env);
         // Add parameters
         let params: Vec<String> = func
@@ -1044,23 +1486,37 @@ impl Handler {
         stct: &move_model::model::StructEnv,
         env: &GlobalEnv,
     ) -> String {
-        let mut definition = format!(
-            "**Struct:**\n```move\npub struct {} {{\n",
-            stct.get_full_name_str()
-        );
+        let name = stct.get_name();
+        let struct_name = name.display(env.symbol_pool());
+        log::info!("Formatting struct definition for: {}", struct_name);
+
+        // Check if it's an enum or struct
+        // For now, we'll treat all as structs since Move doesn't have traditional enums
+        // but we can improve this later if needed
+        let type_keyword = "struct";
+
+        let mut definition = format!("```rust \n{} {} {{\n", type_keyword, struct_name);
         let context = TypeDisplayContext::new(env);
 
         // Add fields
-        for field in stct.get_fields() {
-            let field_type = field.get_type();
-            definition.push_str(&format!(
-                "    {}: {},\n",
-                field.get_name().display(env.symbol_pool()),
-                field_type.display(&context)
-            ));
+        let field_count = stct.get_fields().count();
+        log::info!("Struct has {} fields", field_count);
+
+        if field_count == 0 {
+            definition.push_str("    // No fields\n");
+        } else {
+            for field in stct.get_fields() {
+                let field_type = field.get_type();
+                let name = field.get_name();
+                let field_name = name.display(env.symbol_pool());
+                let field_type_str = field_type.display(&context);
+                log::info!("Field: {}: {}", field_name, field_type_str);
+                definition.push_str(&format!("    {}: {},\n", field_name, field_type_str));
+            }
         }
 
         definition.push_str("}\n```");
+        log::info!("Final struct definition:\n{}", definition);
         definition
     }
 
@@ -1070,12 +1526,13 @@ impl Handler {
         env: &GlobalEnv,
     ) -> String {
         let context = TypeDisplayContext::new(env);
-        let binding = const_env.clone().get_type();
+        let binding = const_env.get_type();
         let const_type = binding.display(&context);
         format!(
-            "**Constant:**\n```move\npub const {}: {} = ...;\n```",
+            "```rust \nconst {}: {} = {:?}\n```",
             const_env.get_name().display(env.symbol_pool()),
-            const_type
+            const_type,
+            const_env.get_value()
         )
     }
 }
