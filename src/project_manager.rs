@@ -19,11 +19,80 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
+    str::FromStr,
 };
 use tempfile::tempdir;
 use walkdir::WalkDir;
 
 impl Project {
+    /// Customized version can be set via APTOS_MOVE_COMPILER_VERSION or get the latest stable version
+    fn get_latest_compiler_version() -> CompilerVersion {
+        // Check if user has specified a compiler version via environment variable
+        if let std::result::Result::Ok(version_str) = std::env::var("APTOS_MOVE_COMPILER_VERSION") {
+            match CompilerVersion::from_str(&version_str) {
+                std::result::Result::Ok(version) => {
+                    log::info!(
+                        "Using user-specified compiler version: {} (from APTOS_MOVE_COMPILER_VERSION)",
+                        version
+                    );
+                    return version;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Invalid compiler version '{}' from APTOS_MOVE_COMPILER_VERSION: {}. Falling back to latest.",
+                        version_str,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Try to use the latest available version, fallback to latest stable if needed
+        let latest = CompilerVersion::latest();
+        let latest_stable = CompilerVersion::latest_stable();
+
+        // Prefer latest if it's stable, otherwise use latest stable
+        if !latest.unstable() {
+            log::info!("Using latest stable compiler version: {}", latest);
+            latest
+        } else {
+            log::info!(
+                "Latest compiler version {} is unstable, using latest stable: {}",
+                latest,
+                latest_stable
+            );
+            latest_stable
+        }
+    }
+
+    /// Get the latest stable language version for Aptos Move
+    /// Can be overridden by environment variable APTOS_MOVE_LANGUAGE_VERSION
+    fn get_latest_language_version() -> LanguageVersion {
+        // Check if user has specified a language version via environment variable
+        if let std::result::Result::Ok(version_str) = std::env::var("APTOS_MOVE_LANGUAGE_VERSION") {
+            match LanguageVersion::from_str(&version_str) {
+                std::result::Result::Ok(version) => {
+                    log::info!(
+                        "Using user-specified language version: {} (from APTOS_MOVE_LANGUAGE_VERSION)",
+                        version
+                    );
+                    return version;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Invalid language version '{}' from APTOS_MOVE_LANGUAGE_VERSION: {}. Falling back to latest stable.",
+                        version_str,
+                        e
+                    );
+                }
+            }
+        }
+
+        let latest_stable = LanguageVersion::latest_stable();
+        log::info!("Using latest stable language version: {}", latest_stable);
+        latest_stable
+    }
+
     pub(crate) fn mk_multi_project_key(&self) -> im::HashSet<PathBuf> {
         use im::HashSet;
         let mut v = HashSet::default();
@@ -42,13 +111,17 @@ impl Project {
             "get_global_env_by_move_package_v2 pkg_path = {:?}",
             pkg_path
         );
+
+        // Get the latest available compiler and language versions
+        let compiler_version = Self::get_latest_compiler_version();
+        let language_version = Self::get_latest_language_version();
         let mut build_config = move_package::BuildConfig {
             test_mode: true,
             install_dir: Some(tempdir().unwrap().path().to_path_buf()),
             skip_fetch_latest_git_deps: true,
             compiler_config: move_package::CompilerConfig {
-                compiler_version: Some(CompilerVersion::V2_1),
-                language_version: Some(LanguageVersion::V2_1),
+                compiler_version: Some(compiler_version), // Use latest available compiler
+                language_version: Some(language_version), // Use latest stable language
                 ..Default::default()
             },
             ..Default::default()
@@ -101,8 +174,8 @@ impl Project {
         };
         let build_plan = BuildPlan::create(resolution_graph)?;
         let compile_cfg = move_package::CompilerConfig {
-            compiler_version: Some(CompilerVersion::V2_1),
-            language_version: Some(LanguageVersion::V2_1),
+            compiler_version: Some(compiler_version), // Use latest available compiler
+            language_version: Some(language_version), // Use latest stable language
             ..Default::default()
         };
         let (_, env) = build_plan.compile_with_driver(
@@ -184,7 +257,7 @@ impl Project {
                     }],
                     true,
                     &Default::default(),
-                    LanguageVersion::V2_1,
+                    LanguageVersion::latest_stable(), // Use latest stable language version
                     false,
                     false,
                     true,
@@ -353,8 +426,7 @@ impl Project {
             std::result::Result::Err(err) => {
                 report_err(format!(
                     "parse manifest '{:?} 'failed.\n addr must exactly 32 length or start with '0x' like '0x2'\n{:?}",
-                    manifest_path,
-                    err
+                    manifest_path, err
                 ));
                 log::error!("parse_move_manifest_from_file failed,err:{:?}", err);
                 self.manifest_load_failures.insert(manifest_path.clone());
