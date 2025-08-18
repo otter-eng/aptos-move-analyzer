@@ -103,8 +103,8 @@
 				},
 				"aptos-move-analyzer.movefmt.enable": {
 					"type": "boolean",
-					"default": false,
-					"markdownDescription": "movefmt disenabled or enabled."
+					"default": true,
+					"markdownDescription": "movefmt disabled or enabled."
 				},
 				"aptos-move-analyzer.movefmt.max_width": {
 					"type": "number",

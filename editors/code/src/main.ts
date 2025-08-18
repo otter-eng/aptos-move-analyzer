@@ -69,6 +69,92 @@ export async function activate(
   // Regist all the aptos commands.
   Reg.regaptos(context);
 
+  // Register document formatting provider for Move files
+  const formattingProvider = vscode.languages.registerDocumentFormattingEditProvider('move', {
+    async provideDocumentFormattingEdits(document: vscode.TextDocument): Promise<vscode.TextEdit[]> {
+      log.info('Formatting request for Move document');
+      
+      try {
+        const client = context.getClient();
+        if (client) {
+          const result = await client.sendRequest('textDocument/formatting', {
+            textDocument: { uri: document.uri.toString() },
+            options: {
+              tabSize: 4,
+              insertSpaces: true,
+              trimTrailingWhitespace: true,
+              insertFinalNewline: true,
+              trimFinalNewlines: true
+            }
+          });
+          
+          if (result && Array.isArray(result)) {
+            log.info(`Formatting returned ${result.length} edits`);
+            return result.map(edit => ({
+              range: new vscode.Range(
+                edit.range.start.line,
+                edit.range.start.character,
+                edit.range.end.line,
+                edit.range.end.character
+              ),
+              newText: edit.newText
+            }));
+          }
+        }
+      } catch (error) {
+        log.info('Formatting error:');
+      }
+      
+      return [];
+    }
+  });
+  extensionContext.subscriptions.push(formattingProvider);
+
+  // Register range formatting provider for Move files
+  const rangeFormattingProvider = vscode.languages.registerDocumentRangeFormattingEditProvider('move', {
+    async provideDocumentRangeFormattingEdits(document: vscode.TextDocument, range: vscode.Range): Promise<vscode.TextEdit[]> {
+      log.info('Range formatting request for Move document');
+      
+      try {
+        const client = context.getClient();
+        if (client) {
+          const result = await client.sendRequest('textDocument/rangeFormatting', {
+            textDocument: { uri: document.uri.toString() },
+            range: {
+              start: { line: range.start.line, character: range.start.character },
+              end: { line: range.end.line, character: range.end.character }
+            },
+            options: {
+              tabSize: 4,
+              insertSpaces: true,
+              trimTrailingWhitespace: true,
+              insertFinalNewline: true,
+              trimFinalNewlines: true
+            }
+          });
+          
+          if (result && Array.isArray(result)) {
+            log.info(`Range formatting returned ${result.length} edits`);
+            return result.map(edit => ({
+              range: new vscode.Range(
+                edit.range.start.line,
+                edit.range.start.character,
+                edit.range.end.line,
+                edit.range.end.character
+              ),
+              newText: edit.newText
+            }));
+          }
+        }
+      } catch (error) {
+        log.info('Range formatting error:');
+      }
+      
+      return [];
+    }
+  });
+  extensionContext.subscriptions.push(rangeFormattingProvider);
+
   const reload_cfg = function(): any {
     const client = context.getClient();
     if (client !== undefined) {

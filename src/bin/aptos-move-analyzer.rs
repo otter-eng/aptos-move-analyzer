@@ -127,8 +127,8 @@ fn main() {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
-        document_formatting_provider: None, // 没有提供格式化功能
-        document_range_formatting_provider: None,
+        document_formatting_provider: Some(OneOf::Left(true)), // Enable document formatting
+        document_range_formatting_provider: Some(OneOf::Left(true)), // Enable range formatting
         document_on_type_formatting_provider: None,
         ..Default::default()
     })
